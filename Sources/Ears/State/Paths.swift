@@ -39,7 +39,9 @@ enum EarsPaths {
             of: "-+", with: "-",
             options: .regularExpression
         )
-        return collapsed.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let trimmed = collapsed.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        guard !trimmed.isEmpty else { return "untitled" }
+        return trimmed
     }
 
     /// Create all required directories.

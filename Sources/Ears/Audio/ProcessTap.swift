@@ -15,16 +15,24 @@ final class ProcessTap {
     private let writeQueue = DispatchQueue(label: "com.ears.audio-write", qos: .userInitiated)
     private var converter: AVAudioConverter?
     private var sourceFormat: AVAudioFormat?
-    private var stopped = false
 
-    /// Total bytes of audio written (for silence detection).
-    private(set) var bytesWritten: UInt64 = 0
-    /// Number of zero-only buffers received (for permission detection).
+    /// Thread-safe stopped flag. Checked on the IO callback thread and set from the caller's thread.
+    private let _stopped = LockedValue(false)
+    private var stopped: Bool {
+        get { _stopped.value }
+        set { _stopped.value = newValue }
+    }
+
+    /// Total bytes of audio written. Only access via `readBytesWritten()` from outside `writeQueue`.
+    private var _bytesWritten: UInt64 = 0
+    func readBytesWritten() -> UInt64 { writeQueue.sync { _bytesWritten } }
+
+    /// Number of zero-only buffers received (for permission detection). Only accessed on writeQueue.
     private var consecutiveSilentBuffers = 0
     private let silenceWarningThreshold = 20 // ~20 callbacks ≈ few seconds
 
+    /// Called on `writeQueue` (background thread) when sustained silence is detected.
     var onSilenceWarning: (() -> Void)?
-    var onAppQuit: (() -> Void)?
 
     private let appPid: pid_t
 
@@ -33,9 +41,8 @@ final class ProcessTap {
         self.wavWriter = wavWriter
     }
 
-    deinit {
-        cleanup()
-    }
+    // No deinit cleanup — callers must call stop() to tear down Core Audio resources.
+    // Having both deinit and stop() call cleanup() creates a race if they run on different threads.
 
     // MARK: - Public
 
@@ -145,6 +152,8 @@ final class ProcessTap {
     // MARK: - Device Readiness
 
     /// Poll until the aggregate device is ready (up to 2 seconds).
+    /// Blocks the calling thread (main thread) — acceptable since this runs during startup,
+    /// before the run loop starts. Core Audio taps need stabilization time.
     private func waitForDeviceReady() throws {
         let timeout = Date().addingTimeInterval(2.0)
         while Date() < timeout {
@@ -166,6 +175,8 @@ final class ProcessTap {
     // MARK: - Format Negotiation
 
     /// Get the audio format from the aggregate device, with retries.
+    /// Blocks the calling thread (main thread) with short sleeps between retries.
+    /// Async device initialization can be flaky — retries are essential per audiotee reference.
     private func negotiateFormat() throws -> AVAudioFormat {
         for attempt in 0..<3 {
             if attempt > 0 {
@@ -248,9 +259,8 @@ final class ProcessTap {
     // MARK: - Audio Buffer Handling
 
     private func handleAudioBuffer(_ inputData: UnsafePointer<AudioBufferList>) {
-        let bufferList = UnsafeBufferPointer<AudioBuffer>(
-            start: &UnsafeMutablePointer(mutating: inputData).pointee.mBuffers,
-            count: Int(inputData.pointee.mNumberBuffers)
+        let bufferList = UnsafeMutableAudioBufferListPointer(
+            UnsafeMutablePointer(mutating: inputData)
         )
 
         for buffer in bufferList {
@@ -290,20 +300,23 @@ final class ProcessTap {
         let frameCount = UInt32(data.count) / sourceFormat.streamDescription.pointee.mBytesPerFrame
         guard frameCount > 0 else { return }
 
-        // Create input buffer
+        // Create input buffer and copy raw data into it via the AudioBufferList,
+        // which handles any source format (float, integer, interleaved, deinterleaved).
         guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else {
             return
         }
         inputBuffer.frameLength = frameCount
 
-        // Copy source data into input buffer
+        let copySize = min(data.count, Int(frameCount * sourceFormat.streamDescription.pointee.mBytesPerFrame))
         data.withUnsafeBytes { rawBuffer in
             guard let src = rawBuffer.baseAddress else { return }
-            if let dst = inputBuffer.floatChannelData {
-                // Interleaved float data
-                memcpy(dst[0], src, min(data.count, Int(frameCount * sourceFormat.streamDescription.pointee.mBytesPerFrame)))
-            } else if let audioBufferList = inputBuffer.mutableAudioBufferList.pointee.mBuffers.mData {
-                memcpy(audioBufferList, src, min(data.count, Int(frameCount * sourceFormat.streamDescription.pointee.mBytesPerFrame)))
+            let ablPointer = UnsafeMutableAudioBufferListPointer(inputBuffer.mutableAudioBufferList)
+            // For mono tap output (CATapDescription stereoMixdown), there's a single buffer.
+            // Copy raw data into it. AVAudioConverter handles format/channel conversion.
+            for buf in ablPointer {
+                guard let dst = buf.mData else { continue }
+                memcpy(dst, src, min(copySize, Int(buf.mDataByteSize)))
+                break // Only need the first buffer for our mono mixdown tap
             }
         }
 
@@ -341,7 +354,7 @@ final class ProcessTap {
         if let channelData = outputBuffer.int16ChannelData {
             let pcmData = Data(bytes: channelData[0], count: byteCount)
             wavWriter.write(pcmData)
-            bytesWritten += UInt64(pcmData.count)
+            _bytesWritten += UInt64(pcmData.count)
         }
     }
 
@@ -457,9 +470,8 @@ enum ProcessTapError: Error, CustomStringConvertible {
 import Foundation
 
 final class ProcessTap {
-    private(set) var bytesWritten: UInt64 = 0
     var onSilenceWarning: (() -> Void)?
-    var onAppQuit: (() -> Void)?
+    func readBytesWritten() -> UInt64 { 0 }
 
     init(pid: pid_t, wavWriter: WAVWriter) {}
     func start() throws { fatalError("ProcessTap requires macOS 14.4+") }

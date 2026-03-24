@@ -30,6 +30,7 @@ enum DurationParser {
             hasAnyComponent = true
         }
 
-        return hasAnyComponent ? total : nil
+        // Return nil for no components or zero/negative duration (would stop immediately)
+        guard hasAnyComponent, total > 0 else { return nil }
     }
 }

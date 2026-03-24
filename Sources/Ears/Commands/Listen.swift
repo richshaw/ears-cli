@@ -38,7 +38,7 @@ struct Listen: ParsableCommand {
 
         // Check for stale state
         if let staleState = StateManager.checkAndCleanStaleState() {
-            print("⚠ Previous recording '\(staleState.title)' was interrupted. State cleaned up.")
+            print("Previous recording '\(staleState.title)' was interrupted. State cleaned up.")
         }
 
         // Check if already listening
@@ -75,19 +75,25 @@ struct Listen: ParsableCommand {
         // Create WAV writer
         let writer = try WAVWriter(url: wavURL)
 
-        // Create and start process tap
+        // Create and start process tap, with cleanup on failure
         let tap = ProcessTap(pid: appPid, wavWriter: writer)
 
         tap.onSilenceWarning = {
             print("")
-            print("⚠ Only silence detected. Check System Settings > Privacy > Screen Recording")
+            print("Only silence detected. Check System Settings > Privacy > Screen Recording")
             print("  and make sure your terminal app has permission.")
         }
 
-        try tap.start()
+        do {
+            try tap.start()
+        } catch {
+            writer.close()
+            try? FileManager.default.removeItem(at: wavURL)
+            throw error
+        }
 
         // Spawn caffeinate
-        let caffeinateProcess = spawnCaffeinate()
+        let caffeinateProcess = Listen.spawnCaffeinate()
 
         // Write state
         let state = RecordingState(
@@ -105,10 +111,17 @@ struct Listen: ParsableCommand {
 
         print("Listening to \(app). Run `ears stop` when done.")
 
-        // Set up duration timer if requested
+        // Capture values for closures (Listen is a struct — closures capture a copy of self)
+        let durationLabel = duration
+        let appName = app
+
+        // Set up duration timer if requested.
+        // Multiple sources (duration timer, SIGINT, SIGTERM, app quit) may call CFRunLoopStop
+        // concurrently. This is safe — CFRunLoopStop is idempotent and the shutdown sequence
+        // runs on the main thread after the run loop exits.
         if let seconds = durationSeconds {
             DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
-                print("\nDuration reached (\(self.duration!)). Stopping...")
+                print("\nDuration reached (\(durationLabel!)). Stopping...")
                 CFRunLoopStop(CFRunLoopGetMain())
             }
         }
@@ -136,7 +149,7 @@ struct Listen: ParsableCommand {
         appCheckTimer.schedule(deadline: .now() + 5, repeating: 5)
         appCheckTimer.setEventHandler {
             if !StateManager.isProcessAlive(pid: appPid) {
-                print("\n\(self.app) quit. Finalizing recording...")
+                print("\n\(appName) quit. Finalizing recording...")
                 CFRunLoopStop(CFRunLoopGetMain())
             }
         }
@@ -157,44 +170,15 @@ struct Listen: ParsableCommand {
         caffeinateProcess?.terminate()
 
         let recordingDuration = Date().timeIntervalSince(state.startTime)
-        print("Recording complete. Duration: \(formatDuration(recordingDuration))")
+        print("Recording complete. Duration: \(Listen.formatDuration(recordingDuration))")
 
         // Handle output
-        switch outputFormat {
-        case .md:
-            print("Transcribing...")
-            do {
-                try WhisperTranscriber.transcribe(
-                    wavPath: wavURL.path,
-                    title: title,
-                    duration: recordingDuration
-                )
-                // Delete WAV after successful transcription
-                try? FileManager.default.removeItem(at: wavURL)
-                print("Transcript saved to: \(EarsPaths.transcriptFile(for: title).path)")
-            } catch {
-                print("Transcription failed: \(error)")
-                print("Audio saved at: \(wavURL.path)")
-            }
-
-        case .audio:
-            print("Audio saved to: \(wavURL.path)")
-
-        case .both:
-            print("Transcribing...")
-            do {
-                try WhisperTranscriber.transcribe(
-                    wavPath: wavURL.path,
-                    title: title,
-                    duration: recordingDuration
-                )
-                print("Audio saved to: \(wavURL.path)")
-                print("Transcript saved to: \(EarsPaths.transcriptFile(for: title).path)")
-            } catch {
-                print("Transcription failed: \(error)")
-                print("Audio saved at: \(wavURL.path)")
-            }
-        }
+        Listen.handleOutput(
+            format: outputFormat,
+            wavURL: wavURL,
+            title: title,
+            duration: recordingDuration
+        )
 
         // Clear state
         StateManager.clear()
@@ -202,7 +186,40 @@ struct Listen: ParsableCommand {
 
     // MARK: - Helpers
 
-    private func spawnCaffeinate() -> Process? {
+    /// Transcribe and/or clean up based on the output format preference.
+    private static func handleOutput(
+        format: RecordingState.OutputFormat,
+        wavURL: URL,
+        title: String,
+        duration: TimeInterval
+    ) {
+        switch format {
+        case .audio:
+            print("Audio saved to: \(wavURL.path)")
+
+        case .md, .both:
+            let keepAudio = (format == .both)
+            print("Transcribing...")
+            do {
+                try WhisperTranscriber.transcribe(
+                    wavPath: wavURL.path,
+                    title: title,
+                    duration: duration
+                )
+                if keepAudio {
+                    print("Audio saved to: \(wavURL.path)")
+                } else {
+                    try? FileManager.default.removeItem(at: wavURL)
+                }
+                print("Transcript saved to: \(EarsPaths.transcriptFile(for: title).path)")
+            } catch {
+                print("Transcription failed: \(error)")
+                print("Audio saved at: \(wavURL.path)")
+            }
+        }
+    }
+
+    private static func spawnCaffeinate() -> Process? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
         process.arguments = ["-i", "-w", String(ProcessInfo.processInfo.processIdentifier)]
@@ -216,7 +233,7 @@ struct Listen: ParsableCommand {
         }
     }
 
-    private func formatDuration(_ seconds: TimeInterval) -> String {
+    static func formatDuration(_ seconds: TimeInterval) -> String {
         let hours = Int(seconds) / 3600
         let minutes = (Int(seconds) % 3600) / 60
         let secs = Int(seconds) % 60

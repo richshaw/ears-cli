@@ -36,7 +36,7 @@ struct Setup: ParsableCommand {
             let response = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "y"
             if response == "y" || response == "" {
                 print("Installing whisper-cpp...")
-                let success = runShell("brew install whisper-cpp")
+                let success = runCommand("/opt/homebrew/bin/brew", arguments: ["install", "whisper-cpp"])
                 if !success {
                     print("  Failed to install whisper-cpp. Try manually: brew install whisper-cpp")
                     throw ExitCode.failure
@@ -80,10 +80,17 @@ struct Setup: ParsableCommand {
 
     // MARK: - Helpers
 
-    private func runShell(_ command: String) -> Bool {
+    /// Run a command directly (no shell interpretation) to avoid command injection risks.
+    private func runCommand(_ executable: String, arguments: [String]) -> Bool {
+        // Find brew in common locations
+        let brewPaths = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+        let resolvedPath = executable.hasSuffix("brew")
+            ? (brewPaths.first { FileManager.default.fileExists(atPath: $0) } ?? executable)
+            : executable
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", command]
+        process.executableURL = URL(fileURLWithPath: resolvedPath)
+        process.arguments = arguments
 
         do {
             try process.run()

@@ -160,7 +160,9 @@ enum WhisperTranscriber {
     /// Find the whisper-cpp binary.
     static func findWhisperBinary() throws -> String {
         // Try common names
-        for name in ["whisper-cpp", "whisper-cli", "whisper", "main"] {
+        // Search for known whisper-cpp binary names. "main" is intentionally excluded
+        // as it's too generic and could match unrelated binaries.
+        for name in ["whisper-cpp", "whisper-cli", "whisper"] {
             if let path = which(name) {
                 return path
             }
