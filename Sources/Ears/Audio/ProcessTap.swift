@@ -7,6 +7,7 @@ import Foundation
 
 /// Captures audio from a specific process using macOS 14.4+ Core Audio process taps.
 /// Reference: AudioCap (github.com/insidegui/AudioCap), audiotee (github.com/makeusabrew/audiotee)
+@available(macOS 14.2, *)
 final class ProcessTap {
     private var tapID: AudioObjectID = kAudioObjectUnknown
     private var aggregateDeviceID: AudioObjectID = kAudioObjectUnknown
@@ -111,6 +112,7 @@ final class ProcessTap {
         let tapDescription = CATapDescription(stereoMixdownOfProcesses: [processObjectID])
         tapDescription.uuid = UUID()
         tapDescription.isPrivate = true
+        tapDescription.muteBehavior = .unmuted
 
         var tapID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateProcessTap(tapDescription, &tapID)
@@ -174,42 +176,27 @@ final class ProcessTap {
 
     // MARK: - Format Negotiation
 
-    /// Get the audio format from the aggregate device, with retries.
-    /// Blocks the calling thread (main thread) with short sleeps between retries.
-    /// Async device initialization can be flaky — retries are essential per audiotee reference.
+    /// Get the audio format from the tap object directly.
+    /// AudioCap reads kAudioTapPropertyFormat from the tap rather than querying the aggregate device.
     private func negotiateFormat() throws -> AVAudioFormat {
-        for attempt in 0..<3 {
-            if attempt > 0 {
-                Thread.sleep(forTimeInterval: 0.02)
-            }
+        var formatAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
 
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyStreamConfiguration,
-                mScope: kAudioObjectPropertyScopeInput,
-                mElement: kAudioObjectPropertyElementMain
-            )
+        var asbd = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let status = AudioObjectGetPropertyData(
+            tapID,
+            &formatAddress,
+            0, nil,
+            &size,
+            &asbd
+        )
 
-            // Get the stream format
-            var formatAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioStreamPropertyVirtualFormat,
-                mScope: kAudioObjectPropertyScopeInput,
-                mElement: kAudioObjectPropertyElementMain
-            )
-
-            var asbd = AudioStreamBasicDescription()
-            var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-            let status = AudioObjectGetPropertyData(
-                aggregateDeviceID,
-                &formatAddress,
-                0, nil,
-                &size,
-                &asbd
-            )
-
-            if status == noErr, asbd.mSampleRate > 0 {
-                guard let format = AVAudioFormat(streamDescription: &asbd) else {
-                    continue
-                }
+        if status == noErr, asbd.mSampleRate > 0 {
+            if let format = AVAudioFormat(streamDescription: &asbd) {
                 return format
             }
         }
@@ -240,7 +227,7 @@ final class ProcessTap {
         var ioProcID: AudioDeviceIOProcID?
 
         let status = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateDeviceID, nil) {
-            [weak self] _, _, inputData, _ in
+            [weak self] _, inputData, _, _, _ in
             guard let self = self, !self.stopped else { return }
             self.handleAudioBuffer(inputData)
         }
@@ -341,7 +328,7 @@ final class ProcessTap {
             return inputBuffer
         }
 
-        if let error = error {
+        if error != nil {
             return // Silently skip conversion errors
         }
 
@@ -393,37 +380,76 @@ final class ProcessTap {
 
 // MARK: - Audio Readiness Polling
 
+@available(macOS 14.2, *)
 extension ProcessTap {
-    /// Poll until the target process is producing audio (PID can be translated).
-    /// Returns the AudioObjectID when ready.
-    static func waitForAudio(pid: pid_t, timeout: TimeInterval = 60.0) throws -> Bool {
+    /// Poll until the target process (or one of its child processes) is producing audio.
+    /// Returns the audio-producing PID when ready, or nil on timeout.
+    /// Some apps (e.g. Chrome) use a helper process for audio, so we check
+    /// both the main PID and its children.
+    static func waitForAudio(pid: pid_t, timeout: TimeInterval = 60.0) -> pid_t? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            var objectID = AudioObjectID(kAudioObjectUnknown)
-            var pid = pid
-            var size = UInt32(MemoryLayout<AudioObjectID>.size)
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
+            // Try the main PID first
+            if canTranslatePID(pid) {
+                return pid
+            }
 
-            let status = AudioObjectGetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                UInt32(MemoryLayout<pid_t>.size),
-                &pid,
-                &size,
-                &objectID
-            )
-
-            if status == noErr && objectID != kAudioObjectUnknown {
-                return true
+            // Try child processes (for apps like Chrome that use audio helper processes)
+            for childPid in childPIDs(of: pid) {
+                if canTranslatePID(childPid) {
+                    return childPid
+                }
             }
 
             Thread.sleep(forTimeInterval: 0.5)
         }
-        return false
+        return nil
+    }
+
+    /// Check if Core Audio can translate this PID to an audio object.
+    private static func canTranslatePID(_ pid: pid_t) -> Bool {
+        var objectID = AudioObjectID(kAudioObjectUnknown)
+        var pid = pid
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            UInt32(MemoryLayout<pid_t>.size),
+            &pid,
+            &size,
+            &objectID
+        )
+
+        return status == noErr && objectID != kAudioObjectUnknown
+    }
+
+    /// Get child PIDs of a given process using pgrep.
+    private static func childPIDs(of parentPid: pid_t) -> [pid_t] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-P", String(parentPid)]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: data, encoding: .utf8) else { return [] }
+            return output
+                .split(separator: "\n")
+                .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
+        } catch {
+            return []
+        }
     }
 }
 

@@ -65,9 +65,17 @@ struct Listen: ParsableCommand {
         print("Waiting for audio from \(app)... (press play in the app)")
 
         #if canImport(CoreAudio)
-        guard try ProcessTap.waitForAudio(pid: appPid) else {
+        guard #available(macOS 14.2, *) else {
+            throw EarsError.unsupportedOS
+        }
+        guard let audioPid = ProcessTap.waitForAudio(pid: appPid) else {
             throw EarsError.audioTimeout(app)
         }
+        if audioPid != appPid {
+            print("Audio found on helper process (PID \(audioPid)).")
+        }
+        #else
+        let audioPid = appPid
         #endif
 
         print("Audio detected. Recording started.")
@@ -75,8 +83,8 @@ struct Listen: ParsableCommand {
         // Create WAV writer
         let writer = try WAVWriter(url: wavURL)
 
-        // Create and start process tap, with cleanup on failure
-        let tap = ProcessTap(pid: appPid, wavWriter: writer)
+        // Create and start process tap using the audio-producing PID
+        let tap = ProcessTap(pid: audioPid, wavWriter: writer)
 
         tap.onSilenceWarning = {
             print("")

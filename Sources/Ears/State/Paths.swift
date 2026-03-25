@@ -75,6 +75,7 @@ enum EarsError: Error, CustomStringConvertible {
     case staleState
     case whisperFailed(String)
     case missingDependency(String)
+    case unsupportedOS
 
     var description: String {
         switch self {
@@ -96,6 +97,8 @@ enum EarsError: Error, CustomStringConvertible {
             return "Transcription failed: \(msg)"
         case .missingDependency(let dep):
             return "\(dep) is not installed."
+        case .unsupportedOS:
+            return "ears requires macOS 14.2 or later."
         }
     }
 }
