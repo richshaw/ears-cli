@@ -36,10 +36,12 @@ final class ProcessTap {
     var onSilenceWarning: (() -> Void)?
 
     private let appPid: pid_t
+    private let mute: Bool
 
-    init(pid: pid_t, wavWriter: WAVWriter) {
+    init(pid: pid_t, wavWriter: WAVWriter, mute: Bool = false) {
         self.appPid = pid
         self.wavWriter = wavWriter
+        self.mute = mute
     }
 
     // No deinit cleanup — callers must call stop() to tear down Core Audio resources.
@@ -112,7 +114,7 @@ final class ProcessTap {
         let tapDescription = CATapDescription(stereoMixdownOfProcesses: [processObjectID])
         tapDescription.uuid = UUID()
         tapDescription.isPrivate = true
-        tapDescription.muteBehavior = .unmuted
+        tapDescription.muteBehavior = mute ? .muted : .unmuted
 
         var tapID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateProcessTap(tapDescription, &tapID)
@@ -499,7 +501,7 @@ final class ProcessTap {
     var onSilenceWarning: (() -> Void)?
     func readBytesWritten() -> UInt64 { 0 }
 
-    init(pid: pid_t, wavWriter: WAVWriter) {}
+    init(pid: pid_t, wavWriter: WAVWriter, mute: Bool = false) {}
     func start() throws { fatalError("ProcessTap requires macOS 14.4+") }
     func stop() {}
 

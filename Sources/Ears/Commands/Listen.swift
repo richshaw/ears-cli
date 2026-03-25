@@ -18,6 +18,9 @@ struct Listen: ParsableCommand {
     @Option(name: .long, help: "What to keep: md (default), audio, or both.")
     var output: String = "md"
 
+    @Flag(name: .long, help: "Mute the app's audio output while recording.")
+    var mute: Bool = false
+
     mutating func run() throws {
         try EarsPaths.requireSetup()
         try EarsPaths.ensureDirectories()
@@ -84,7 +87,7 @@ struct Listen: ParsableCommand {
         let writer = try WAVWriter(url: wavURL)
 
         // Create and start process tap using the audio-producing PID
-        let tap = ProcessTap(pid: audioPid, wavWriter: writer)
+        let tap = ProcessTap(pid: audioPid, wavWriter: writer, mute: mute)
 
         tap.onSilenceWarning = {
             print("")
@@ -117,7 +120,11 @@ struct Listen: ParsableCommand {
         )
         try StateManager.save(state)
 
-        print("Listening to \(app). Run `ears stop` when done.")
+        if mute {
+            print("Listening to \(app) (muted). Run `ears stop` when done.")
+        } else {
+            print("Listening to \(app). Run `ears stop` when done.")
+        }
 
         // Capture values for closures (Listen is a struct — closures capture a copy of self)
         let durationLabel = duration
