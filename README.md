@@ -1,6 +1,6 @@
-# ears
+# Ears
 
-Capture and transcribe audio from any macOS app. Record a podcast in Chrome, an audiobook in Audible, a lecture in Zoom — get a timestamped markdown transcript.
+Ears for your AI. Capture and transcribe audio from any macOS app. Record a podcast in Chrome, an audiobook in Audible, a lecture in Zoom, get a timestamped markdown transcript.
 
 ## Quick start
 
