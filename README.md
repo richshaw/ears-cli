@@ -38,6 +38,7 @@ ears listen --app <app-name> --title <name> [--duration <time>] [--output <forma
 | `--title` | Yes | Name for the recording and transcript |
 | `--duration` | No | Auto-stop after time: `1h30m`, `45m`, `90s` |
 | `--output` | No | What to keep: `md` (default), `audio`, or `both` |
+| `--mute` | No | Silence the app's audio output while recording |
 
 The target app must be running and producing audio. Prevents Mac sleep automatically via `caffeinate`.
 
