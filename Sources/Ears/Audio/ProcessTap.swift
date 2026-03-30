@@ -386,21 +386,26 @@ final class ProcessTap {
 extension ProcessTap {
     /// Poll until the target process (or one of its child processes) is producing audio.
     /// Returns the audio-producing PID when ready, or nil on timeout.
-    /// Some apps (e.g. Chrome) use a helper process for audio, so we check
-    /// both the main PID and its children.
+    /// Some apps (e.g. Chrome) use a dedicated helper process for audio output,
+    /// so we always check children first — a child audio process takes priority
+    /// over the main PID, since tapping the main PID of a multi-process app
+    /// can yield silence even though the main PID has a registered audio object.
     static func waitForAudio(pid: pid_t, timeout: TimeInterval = 60.0) -> pid_t? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            // Try the main PID first
-            if canTranslatePID(pid) {
-                return pid
-            }
-
-            // Try child processes (for apps like Chrome that use audio helper processes)
+            // Check child processes first — apps like Chrome route audio through
+            // a dedicated helper (e.g. audio.mojom.AudioService). Tapping the
+            // main process PID yields silence because the audio object on the
+            // main PID is a registration stub, not the actual audio output.
             for childPid in childPIDs(of: pid) {
                 if canTranslatePID(childPid) {
                     return childPid
                 }
+            }
+
+            // Fall back to the main PID (single-process apps)
+            if canTranslatePID(pid) {
+                return pid
             }
 
             Thread.sleep(forTimeInterval: 0.5)
