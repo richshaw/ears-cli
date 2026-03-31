@@ -34,6 +34,9 @@ struct Status: ParsableCommand {
         print("  Title:    \(state.title)")
         print("  Duration: \(durationStr)")
         print("  Output:   \(state.output.rawValue)")
+        if state.mic == true {
+            print("  Mic:      on")
+        }
 
         // Show file size if WAV exists
         let fm = FileManager.default

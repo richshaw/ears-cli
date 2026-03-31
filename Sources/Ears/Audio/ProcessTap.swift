@@ -28,12 +28,40 @@ final class ProcessTap {
     private var _bytesWritten: UInt64 = 0
     func readBytesWritten() -> UInt64 { writeQueue.sync { _bytesWritten } }
 
+    /// Enqueue converted mic samples for mixing with the next tap audio buffer.
+    /// Called from MicCapture's convert queue; dispatches to writeQueue for thread safety.
+    func enqueueMicSamples(_ data: Data) {
+        writeQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.micBuffer.append(data)
+            // Enforce maximum buffer size: discard oldest data if exceeded
+            if self.micBuffer.count > self.micBufferMaxSize {
+                let excessBytes = self.micBuffer.count - self.micBufferMaxSize
+                self.micBuffer.removeFirst(excessBytes)
+            }
+        }
+    }
+
     /// Number of zero-only buffers received (for permission detection). Only accessed on writeQueue.
     private var consecutiveSilentBuffers = 0
     private let silenceWarningThreshold = 20 // ~20 callbacks ≈ few seconds
 
     /// Called on `writeQueue` (background thread) when sustained silence is detected.
     var onSilenceWarning: (() -> Void)?
+
+    /// Accumulated mic samples (16kHz mono int16 PCM) waiting to be mixed. Only accessed on writeQueue.
+    private var micBuffer = Data()
+    /// Maximum size for micBuffer: 5 seconds at 16kHz mono int16 = 16000 * 2 bytes/sample * 5 seconds = 160000 bytes.
+    /// Prevents unbounded growth if the tap callback stalls or fires infrequently.
+    private let micBufferMaxSize = 160000
+
+    /// Timer that periodically flushes pending mic samples when app audio is idle.
+    /// Prevents mic audio from being silently dropped during gaps in app audio.
+    /// Only accessed from the caller thread (start/stop).
+    private var micFlushTimer: DispatchSourceTimer?
+
+    /// Tracks whether app audio arrived since the last mic flush check. Only accessed on writeQueue.
+    private var appAudioReceivedSinceLastFlush = false
 
     private let appPid: pid_t
     private let mute: Bool
@@ -66,14 +94,25 @@ final class ProcessTap {
         guard !stopped else { return }
         stopped = true
 
+        // Cancel the mic flush timer before draining the queue
+        micFlushTimer?.cancel()
+        micFlushTimer = nil
+
         if let ioProcID = ioProcID {
             AudioDeviceStop(aggregateDeviceID, ioProcID)
             AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
             self.ioProcID = nil
         }
 
-        // Drain the write queue before finalizing
-        writeQueue.sync {}
+        // Drain the write queue and flush any remaining mic samples before finalizing
+        writeQueue.sync {
+            if !self.micBuffer.isEmpty {
+                let remaining = self.micBuffer
+                self.micBuffer = Data()
+                self.wavWriter.write(remaining)
+                self._bytesWritten += UInt64(remaining.count)
+            }
+        }
         try? wavWriter.finalize()
 
         cleanup()
@@ -243,6 +282,43 @@ final class ProcessTap {
         guard startStatus == noErr else {
             throw ProcessTapError.deviceStartFailed(startStatus)
         }
+
+        startMicFlushTimer()
+    }
+
+    // MARK: - Mic Flush Timer
+
+    /// Start a repeating timer that flushes pending mic samples when app audio is idle.
+    /// Fires every 100ms on the writeQueue. If no app audio has arrived since the last
+    /// tick and there are pending mic samples, writes them with silence for the app channel.
+    private func startMicFlushTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: writeQueue)
+        timer.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            guard let self = self, !self.stopped else { return }
+            self.flushMicBufferIfIdle()
+        }
+        timer.resume()
+        micFlushTimer = timer
+    }
+
+    /// Flush pending mic samples as mic-only frames (zero app audio) when the tap is idle.
+    /// Must be called on writeQueue.
+    private func flushMicBufferIfIdle() {
+        // If app audio arrived recently, it already consumed mic samples via convertAndWrite.
+        if appAudioReceivedSinceLastFlush {
+            appAudioReceivedSinceLastFlush = false
+            return
+        }
+
+        // No app audio since last tick — write mic samples with silence for app channel.
+        guard !micBuffer.isEmpty else { return }
+
+        let micData = micBuffer
+        micBuffer = Data()
+
+        wavWriter.write(micData)
+        _bytesWritten += UInt64(micData.count)
     }
 
     // MARK: - Audio Buffer Handling
@@ -284,6 +360,7 @@ final class ProcessTap {
 
     /// Convert audio data from source format to 16kHz mono 16-bit and write to WAV.
     private func convertAndWrite(_ data: Data) {
+        appAudioReceivedSinceLastFlush = true
         guard let converter = converter, let sourceFormat = sourceFormat else { return }
 
         let frameCount = UInt32(data.count) / sourceFormat.streamDescription.pointee.mBytesPerFrame
@@ -341,7 +418,26 @@ final class ProcessTap {
         let byteCount = Int(outputBuffer.frameLength * bytesPerFrame)
 
         if let channelData = outputBuffer.int16ChannelData {
-            let pcmData = Data(bytes: channelData[0], count: byteCount)
+            var pcmData = Data(bytes: channelData[0], count: byteCount)
+
+            // Mix in mic samples if available
+            if !micBuffer.isEmpty {
+                let mixBytes = min(pcmData.count, micBuffer.count)
+                // Both streams are 16kHz mono int16 — sum with clamping
+                pcmData.withUnsafeMutableBytes { tapPtr in
+                    micBuffer.withUnsafeBytes { micPtr in
+                        let tapSamples = tapPtr.bindMemory(to: Int16.self)
+                        let micSamples = micPtr.bindMemory(to: Int16.self)
+                        let sampleCount = mixBytes / MemoryLayout<Int16>.size
+                        for i in 0..<sampleCount {
+                            let mixed = Int32(tapSamples[i]) + Int32(micSamples[i])
+                            tapSamples[i] = Int16(clamping: mixed)
+                        }
+                    }
+                }
+                micBuffer.removeSubrange(0..<mixBytes)
+            }
+
             wavWriter.write(pcmData)
             _bytesWritten += UInt64(pcmData.count)
         }
@@ -505,6 +601,7 @@ import Foundation
 final class ProcessTap {
     var onSilenceWarning: (() -> Void)?
     func readBytesWritten() -> UInt64 { 0 }
+    func enqueueMicSamples(_ data: Data) {}
 
     init(pid: pid_t, wavWriter: WAVWriter, mute: Bool = false) {}
     func start() throws { fatalError("ProcessTap requires macOS 14.4+") }

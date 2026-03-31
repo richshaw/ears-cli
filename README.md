@@ -39,6 +39,7 @@ ears listen --app <app-name> --title <name> [--duration <time>] [--output <forma
 | `--duration` | No | Auto-stop after time: `1h30m`, `45m`, `90s` |
 | `--output` | No | What to keep: `md` (default), `audio`, or `both` |
 | `--mute` | No | Silence the app's audio output while recording |
+| `--mic` | No | Also record microphone input alongside app audio |
 
 The target app must be running and producing audio. Prevents Mac sleep automatically via `caffeinate`.
 
@@ -90,7 +91,7 @@ Duration: 01:23:45
 ## How it works
 
 1. **Process tap** — Uses macOS 14.4+ Core Audio process taps (`AudioHardwareCreateProcessTap`) to capture audio directly from a target app's output. No virtual audio devices needed.
-2. **Format conversion** — Converts captured audio to 16kHz mono 16-bit PCM via `AVAudioConverter` and streams to a WAV file.
+2. **Format conversion** — Converts captured audio to 16kHz mono 16-bit PCM via `AVAudioConverter` and streams to a WAV file. With `--mic`, microphone input is mixed into the same stream.
 3. **Transcription** — Runs whisper-cpp (with Metal GPU acceleration) on the WAV. Long recordings are split into 1-hour chunks with timestamp offsets.
 4. **Output** — Converts SRT output to clean markdown with timestamps.
 

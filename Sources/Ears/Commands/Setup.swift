@@ -75,7 +75,11 @@ struct Setup: ParsableCommand {
         print("Note: The first recording will request Screen Recording permission.")
         print("  Make sure to allow it in System Settings > Privacy > Screen Recording.")
         print("")
+        print("To also capture your microphone, add --mic to the listen command.")
+        print("  This requires Microphone permission in System Settings > Privacy > Microphone.")
+        print("")
         print("Usage: ears listen --title \"My Book\" --app Libby")
+        print("       ears listen --title \"Meeting\" --app \"Google Chrome\" --mic")
     }
 
     // MARK: - Helpers
