@@ -140,6 +140,8 @@ final class MicCapture {
     // MARK: - Buffer Handling
 
     private func handleMicBuffer(_ inputData: UnsafePointer<AudioBufferList>) {
+        // Mutable cast required for UnsafeMutableAudioBufferListPointer API ergonomics,
+        // but we only read from the buffer—the input data is not modified.
         let bufferList = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inputData)
         )
@@ -243,13 +245,13 @@ import Foundation
 final class MicCapture {
     var onSamples: ((Data) -> Void)?
     init() {}
-    func start() throws { fatalError("MicCapture requires macOS 14.4+") }
+    func start() throws { fatalError("MicCapture requires macOS 14.2+") }
     func stop() {}
 }
 
 enum MicCaptureError: Error, CustomStringConvertible {
     case notSupported
-    var description: String { "MicCapture requires macOS 14.4+" }
+    var description: String { "MicCapture requires macOS 14.2+" }
 }
 
 #endif
