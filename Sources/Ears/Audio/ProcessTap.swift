@@ -28,12 +28,23 @@ final class ProcessTap {
     private var _bytesWritten: UInt64 = 0
     func readBytesWritten() -> UInt64 { writeQueue.sync { _bytesWritten } }
 
+    /// Enqueue converted mic samples for mixing with the next tap audio buffer.
+    /// Called from MicCapture's convert queue; dispatches to writeQueue for thread safety.
+    func enqueueMicSamples(_ data: Data) {
+        writeQueue.async { [weak self] in
+            self?.micBuffer.append(data)
+        }
+    }
+
     /// Number of zero-only buffers received (for permission detection). Only accessed on writeQueue.
     private var consecutiveSilentBuffers = 0
     private let silenceWarningThreshold = 20 // ~20 callbacks ≈ few seconds
 
     /// Called on `writeQueue` (background thread) when sustained silence is detected.
     var onSilenceWarning: (() -> Void)?
+
+    /// Accumulated mic samples (16kHz mono int16 PCM) waiting to be mixed. Only accessed on writeQueue.
+    private var micBuffer = Data()
 
     private let appPid: pid_t
     private let mute: Bool
@@ -341,7 +352,26 @@ final class ProcessTap {
         let byteCount = Int(outputBuffer.frameLength * bytesPerFrame)
 
         if let channelData = outputBuffer.int16ChannelData {
-            let pcmData = Data(bytes: channelData[0], count: byteCount)
+            var pcmData = Data(bytes: channelData[0], count: byteCount)
+
+            // Mix in mic samples if available
+            if !micBuffer.isEmpty {
+                let mixBytes = min(pcmData.count, micBuffer.count)
+                // Both streams are 16kHz mono int16 — sum with clamping
+                pcmData.withUnsafeMutableBytes { tapPtr in
+                    micBuffer.withUnsafeBytes { micPtr in
+                        let tapSamples = tapPtr.bindMemory(to: Int16.self)
+                        let micSamples = micPtr.bindMemory(to: Int16.self)
+                        let sampleCount = mixBytes / MemoryLayout<Int16>.size
+                        for i in 0..<sampleCount {
+                            let mixed = Int32(tapSamples[i]) + Int32(micSamples[i])
+                            tapSamples[i] = Int16(clamping: mixed)
+                        }
+                    }
+                }
+                micBuffer.removeFirst(mixBytes)
+            }
+
             wavWriter.write(pcmData)
             _bytesWritten += UInt64(pcmData.count)
         }
@@ -505,6 +535,7 @@ import Foundation
 final class ProcessTap {
     var onSilenceWarning: (() -> Void)?
     func readBytesWritten() -> UInt64 { 0 }
+    func enqueueMicSamples(_ data: Data) {}
 
     init(pid: pid_t, wavWriter: WAVWriter, mute: Bool = false) {}
     func start() throws { fatalError("ProcessTap requires macOS 14.4+") }

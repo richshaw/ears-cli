@@ -21,6 +21,9 @@ struct Listen: ParsableCommand {
     @Flag(name: .long, help: "Mute the app's audio output while recording.")
     var mute: Bool = false
 
+    @Flag(name: .long, help: "Also record microphone input.")
+    var mic: Bool = false
+
     mutating func run() throws {
         try EarsPaths.requireSetup()
         try EarsPaths.ensureDirectories()
@@ -103,6 +106,21 @@ struct Listen: ParsableCommand {
             throw error
         }
 
+        // Start mic capture if requested
+        var micCapture: MicCapture?
+        if mic {
+            let capture = MicCapture()
+            capture.onSamples = { [weak tap] data in
+                tap?.enqueueMicSamples(data)
+            }
+            do {
+                try capture.start()
+                micCapture = capture
+            } catch {
+                print("Warning: Mic capture failed (\(error)). Recording app audio only.")
+            }
+        }
+
         // Spawn caffeinate
         let caffeinateProcess = Listen.spawnCaffeinate()
 
@@ -116,14 +134,16 @@ struct Listen: ParsableCommand {
             startTime: Date(),
             wavPath: wavURL.path,
             output: outputFormat,
-            duration: duration
+            duration: duration,
+            mic: mic
         )
         try StateManager.save(state)
 
+        let micLabel = micCapture != nil ? " + mic" : ""
         if mute {
-            print("Listening to \(app) (muted). Run `ears stop` when done.")
+            print("Listening to \(app)\(micLabel) (muted). Run `ears stop` when done.")
         } else {
-            print("Listening to \(app). Run `ears stop` when done.")
+            print("Listening to \(app)\(micLabel). Run `ears stop` when done.")
         }
 
         // Capture values for closures (Listen is a struct — closures capture a copy of self)
@@ -179,6 +199,7 @@ struct Listen: ParsableCommand {
         sigtermSource.cancel()
 
         // Stop audio capture
+        micCapture?.stop()
         tap.stop()
 
         // Kill caffeinate

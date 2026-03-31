@@ -11,6 +11,7 @@ struct RecordingState: Codable {
     let wavPath: String
     let output: OutputFormat
     let duration: String?
+    let mic: Bool?
 
     enum OutputFormat: String, Codable {
         case md
